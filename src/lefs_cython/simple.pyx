@@ -17,6 +17,7 @@ ctypedef np.int64_t int64_t  # for searchsorted output
 from libcpp.algorithm cimport sort
 from libc.string cimport memcpy
 from libc.stdint cimport int32_t
+from libc.math cimport fabsf
 
 cdef extern from "stddef.h":
     ctypedef size_t size_t
@@ -107,6 +108,26 @@ constants['MOVE_POLICY_ALTERNATE'] = MOVE_POLICY_ALTERNATE
 constants['MOVE_POLICY_ONELEG_RANDOM'] = MOVE_POLICY_ONELEG_RANDOM
 
 
+cdef inline float_t point_region_distance(float_t position, float_t start,
+                                          float_t end, int_t size,
+                                          bool_t circular) noexcept:
+    """Backbone distance to a closed interval, in lattice-site units.
+
+    On a ring, start > end denotes the interval crossing site zero. A point
+    outside the interval can approach either endpoint along either ring arc.
+    """
+    cdef float_t left, right
+    if start <= end:
+        if start <= position <= end:
+            return 0
+    elif circular and (position >= start or position <= end):
+        return 0
+    left = fabsf(position - start)
+    right = fabsf(position - end)
+    if circular:
+        left = min(left, size - left)
+        right = min(right, size - right)
+    return min(left, right)
 
 
 
@@ -132,6 +153,10 @@ cdef class LEFSimulator(object):
         An array of probabilities of pausing a LEF at each position
     skip_load : bool
         If True, the LEFs are not loaded at the start of the simulation. Default is False (load randomly).
+    circular : bool
+        If True, sites N-1 and 0 are consecutive backbone sites. Loading,
+        movement and graph distances use this closed ring. Leg identities
+        remain directional even when the left leg has the larger site index.
 
     Attributes
     ----------
@@ -170,6 +195,7 @@ cdef class LEFSimulator(object):
     """
     cdef int_t N
     cdef int_t NLEFs
+    cdef readonly bool_t circular
     # user defined arrays - unload (load is not needed because cumulatively loaded probabilities are used)
     cdef float_t [:, ::1] unload_prob
     # user defined arrays - CTCF interactions
@@ -215,13 +241,17 @@ cdef class LEFSimulator(object):
         skip_load=False,
         move_policy=MOVE_POLICY_BOTH,
         alternate_prob=0.01,
+        circular=False,
     ):
         """
         Initialize the class with the probabilities of loading, unloading, capturing, releasing, and pausing
         """
-        # safety checks so that we don't accidentally load/unload at the boundaries
-        load_prob[0:2] = 0
-        load_prob[len(load_prob) - 2 : len(load_prob)] = 0
+        self.circular = circular
+        # A line needs room for the three-site loading window at each end.
+        # A ring has no ends: its loading window wraps across N-1 and 0.
+        if not self.circular:
+            load_prob[0:2] = 0
+            load_prob[len(load_prob) - 2 : len(load_prob)] = 0
 
         # cumulative load_prob arrays for cached load_prob function
         cum_load_prob = np.cumsum(load_prob)
@@ -258,10 +288,11 @@ cdef class LEFSimulator(object):
         self.LEFs = np.zeros((self.NLEFs, 2), dtype=int_t_np, order="C")
         self.statuses = np.full((self.NLEFs, 2), STATUS_MOVING, dtype=int_t_np, order="C")
 
-        # some safety things for occupied array
+        # Only a linear backbone has permanently occupied end sites.
         self.occupied = np.full(self.N, OCCUPIED_FREE, dtype=int_t_np, order="C")
-        self.occupied[0] = OCCUPIED_BOUNDARY
-        self.occupied[self.N - 1] = OCCUPIED_BOUNDARY
+        if not self.circular:
+            self.occupied[0] = OCCUPIED_BOUNDARY
+            self.occupied[self.N - 1] = OCCUPIED_BOUNDARY
 
         # dijkstra related arrays - 2x NLEF long. Pre-allocating them now.
         self.lef_neigh_pos = np.zeros((self.NLEFs * 2, 3), dtype=int_t_np, order="C")
@@ -427,28 +458,39 @@ cdef class LEFSimulator(object):
         """
         An internal method to load a given LEF - is called by "unload" method on its own
         """
-        cdef int_t pos, leflen, leg
+        cdef int_t pos, leflen, leg, left, right, newpos
 
         while True:
             pos = self.get_cached_load_position()
-            if pos >= self.N - 2 or pos <= 1:  # N-1 is a boundary, we need to be N-4 to fit a 2-wide LEF
+            if not self.circular and (pos >= self.N - 2 or pos <= 1):
                 warnings.warn(f"Ignoring load_prob at 0 or end. load_prob at: {pos}")
                 continue
 
-            # checking all 3 positions for consistency and to avoid a LEF being born around another LEF's leg
+            # Require the same three empty sites on either backbone. In a
+            # ring, a loading centre at zero checks N-1, 0 and 1. Explicit
+            # wrapping avoids negative C remainders in unchecked array access.
+            left, right = pos - 1, pos + 1
+            if self.circular:
+                if left < 0:
+                    left += self.N
+                if right >= self.N:
+                    right -= self.N
             if (
-                self.occupied[pos - 1] != OCCUPIED_FREE
+                self.occupied[left] != OCCUPIED_FREE
                 or self.occupied[pos] != OCCUPIED_FREE
-                or self.occupied[pos + 1] != OCCUPIED_FREE
+                or self.occupied[right] != OCCUPIED_FREE
             ):
                 continue
 
             # Need to make LEFs of different sizes - 1 or 2 wide, to avoid checkering in the contact map
             leflen = 2 if randnum() > 0.5 else 1  # 1 or 2 wide LEF at loading
             for leg in range(2):
-                self.LEFs[lef, leg] = pos - 1 + leg * leflen  # [pos-1, pos] or [pos-1, pos+1]
+                newpos = left + leg * leflen  # [pos-1, pos] or [pos-1, pos+1]
+                if self.circular and newpos >= self.N:
+                    newpos -= self.N
+                self.LEFs[lef, leg] = newpos
                 self.statuses[lef, leg] = STATUS_MOVING
-                self.occupied[pos - 1 + leg * leflen] = lef + self.NLEFs * leg  # record which LEF/leg is there
+                self.occupied[newpos] = lef + self.NLEFs * leg  # record which LEF/leg is there
             break
 
     cdef unload(self):
@@ -536,6 +578,14 @@ cdef class LEFSimulator(object):
                 # check if "this" leg is captured or inactive - attempt a move i fit's not
                 if  self.statuses[lef, leg] != STATUS_CAPTURED and self.statuses[lef, leg] != STATUS_INACTIVE:
                     newpos = pos + (2 * leg - 1)  # leg 1 moves "right" - increasing numbers
+                    # Crossing site zero changes the stored index, not the
+                    # leg identity or direction. Check the wrapped target for
+                    # another head before moving, including our own other leg.
+                    if self.circular:
+                        if newpos < 0:
+                            newpos += self.N
+                        elif newpos >= self.N:
+                            newpos -= self.N
                     if self.occupied[newpos] == OCCUPIED_FREE:  # Can we go there?
                         if randnum() > self.pause_prob[pos]:  # check if we are paused
                             # The leg can move, so we need to update the arrays
@@ -572,7 +622,10 @@ cdef class LEFSimulator(object):
         float
             The distance between the two positions through the LEF graph
         """
-
+        # Point regions use the ring-aware graph search below. This includes
+        # the backbone arc across zero and queries between lattice sites.
+        if self.circular:
+            return self.compute_region_distances(start, start, end, end)
         
         cdef int_t size = self.lefs_pos_flat_sorted.shape[0]
         cdef float_t INF = 1e10
@@ -673,9 +726,11 @@ cdef class LEFSimulator(object):
         Parameters
         ----------
         r1_start, r1_end : float
-            The start and end coordinates (in kb) of region 1 (e.g. a promoter).
+            Endpoints of region 1 in lattice-site units (e.g. a promoter).
         r2_start, r2_end : float
-            The start and end coordinates (in kb) of region 2 (e.g. an enhancer).
+            Endpoints of region 2 in lattice-site units (e.g. an enhancer).
+            On a ring, start > end describes a region crossing site zero;
+            [0, N] describes the entire backbone.
         return_loop_count : bool
             If True, returns (distance, loop_count), otherwise just distance
 
@@ -708,6 +763,15 @@ cdef class LEFSimulator(object):
         else:
             # They overlap
             direct_dist = 0
+        if self.circular:
+            # Four endpoint-to-region distances also handle overlapping or
+            # nested arcs, and intervals that themselves cross site zero.
+            direct_dist = min(
+                point_region_distance(r1_start, r2_start, r2_end, self.N, True),
+                point_region_distance(r1_end, r2_start, r2_end, self.N, True),
+                point_region_distance(r2_start, r1_start, r1_end, self.N, True),
+                point_region_distance(r2_end, r1_start, r1_end, self.N, True),
+            )
 
         #---------------------------------------------------------
         # 2. Multi-source initialization:
@@ -719,13 +783,8 @@ cdef class LEFSimulator(object):
         #    into the priority queue.
         #---------------------------------------------------------
         for k in range(size):
-            anchor_r1_dist = 0
-            if pos_view[k] < r1_start:
-                anchor_r1_dist = r1_start - pos_view[k]
-            elif pos_view[k] > r1_end:
-                anchor_r1_dist = pos_view[k] - r1_end
-            else:
-                anchor_r1_dist = 0  # inside region 1
+            anchor_r1_dist = point_region_distance(
+                pos_view[k], r1_start, r1_end, self.N, self.circular)
 
             self.djikstra_dist[k] = anchor_r1_dist
             djikstra_loops[k] = 0  # no loops used to reach sources
@@ -757,13 +816,8 @@ cdef class LEFSimulator(object):
             #-----------------------------------------------------
             # 3a. Check distance from this anchor to region 2
             #-----------------------------------------------------
-            if pos_view[u] < r2_start:
-                anchor_r2_dist = r2_start - pos_view[u]
-            elif pos_view[u] > r2_end:
-                anchor_r2_dist = pos_view[u] - r2_end
-            else:
-                # anchor is inside region 2
-                anchor_r2_dist = 0
+            anchor_r2_dist = point_region_distance(
+                pos_view[u], r2_start, r2_end, self.N, self.circular)
 
             # If going from region 1 -> anchor u -> region 2
             # yields a smaller distance than we have so far,
@@ -823,6 +877,10 @@ cdef class LEFSimulator(object):
         cdef int_t i, lef_ind, lef, leg, occval, pos, pos2, lef_ind2, nlefs
         cdef float_t dist
         cdef int_t size = self.NLEFs * 2        
+        # With no extruders there are no anchor arrays to populate; distance
+        # queries reduce to the direct backbone distance.
+        if size == 0:
+            return
 
         # flatten LEF positions with memcpy, sort with std sort
         # Tested that std sort is faster than np.ndarray.sort() for up to 100k elements
@@ -839,6 +897,12 @@ cdef class LEFSimulator(object):
                 if merge_touching_lefs and dist == 1:
                     dist = 0  # no distance between neighboring LEFs
                 self.lef_neigh_dist[i, 0] = dist
+            elif self.circular:
+                self.lef_neigh_pos[i, 0] = size - 1
+                dist = self.N + self.lefs_pos_flat_sorted[0] - self.lefs_pos_flat_sorted[size - 1]
+                if merge_touching_lefs and dist == 1:
+                    dist = 0
+                self.lef_neigh_dist[i, 0] = dist
             else:
                 self.lef_neigh_pos[i, 0] = i
                 self.lef_neigh_dist[i, 0] = 1e6  # large distance to avoid going back to yourself
@@ -849,6 +913,12 @@ cdef class LEFSimulator(object):
                 dist = self.lefs_pos_flat_sorted[i + 1] - self.lefs_pos_flat_sorted[i]
                 if merge_touching_lefs and dist == 1:
                     dist = 0  # no distance between neighboring LEFs
+                self.lef_neigh_dist[i, 1] = dist
+            elif self.circular:
+                self.lef_neigh_pos[i, 1] = 0
+                dist = self.N + self.lefs_pos_flat_sorted[0] - self.lefs_pos_flat_sorted[size - 1]
+                if merge_touching_lefs and dist == 1:
+                    dist = 0
                 self.lef_neigh_dist[i, 1] = dist
             else:
                 self.lef_neigh_pos[i, 1] = i

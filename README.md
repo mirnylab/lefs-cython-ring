@@ -1,4 +1,58 @@
-This example contains a draft of a new extrusion simulation code. 
+# lefs-cython-ring
+
+Circular-backbone support for [Mirnylab's lefs-cython](https://github.com/mirnylab/lefs-cython),
+by Max Imakaev and Timothy Földes. The Cython simulator accepts genomic loading,
+unloading, pausing and directional CTCF capture/release probabilities. Its
+positions and status arrays can be used to measure cohesin occupancy, including
+the subset of heads captured at CTCF.
+
+Install from this checkout with `pip install -e .`. The Python import remains
+`from lefs_cython.simple import LEFSimulator, constants`.
+
+## Circular backbone
+
+Pass `circular=True` to `LEFSimulator(...)` to connect sites `N-1` and `0`.
+The default `circular=False` retains the original linear backbone.
+
+- Every ring site is available for loading. The existing three-site empty
+  loading window wraps across zero, and newly loaded loops retain their
+  original one-site or two-site width distribution.
+- Heads keep their directional identities as they cross zero. Leg 0 moves
+  left and leg 1 moves right; their numerical indices need not be ordered.
+  Occupied sites still block movement, including the same motor's other head.
+- Capture, release, pausing and status-dependent unloading follow the same
+  rules on both backbones. A released head can resume movement; changing the
+  backbone does not change these probabilities or their time convention.
+- The graph-distance helpers include the closing backbone arc. Coordinates
+  and distances are in lattice-site units. A region with `start > end`
+  crosses zero; `[0, N]` represents the whole ring. Call
+  `populate_dijkstra_arrays(...)` after changing the motor configuration and
+  before querying distances, as in the original API.
+
+`circular=True` describes the one-dimensional genomic backbone. It does not
+specify a three-dimensional periodic box or a polymer contact-distance rule.
+The original architecture notes below describe the shared motor dynamics.
+
+## Verification
+
+Run `python -m pytest -q tests` to check both backbones. The 18 checks cover
+the original linear dynamics plus ring crossings, loading and reloading at
+zero, collisions, directional capture/release, and circular graph distances.
+
+A CPU timing check with 50,000 sites and 435 motors took 1.63 seconds for
+100,000 updates on the development host. It used 0.0216 s per decision,
+125 bp/s per head at 1 kb/site, and 822-s residence. This measures forward
+dynamics; obtaining a sufficiently sampled occupancy profile is a separate
+requirement for fitting.
+
+A uniform-ring control used nine motors on 1,000 sites and sampled 20,000
+configurations over two million updates. Mean head occupancy over the ten
+sites on either side of zero was 1.006 times that over the other sites.
+This finite-sampling diagnostic found no special accumulation at the join.
+
+## Original architecture notes
+
+This example contains a draft of a new extrusion simulation code.
 
 ## Code architecture and assumption 
 
