@@ -32,6 +32,7 @@ float_t_np = np.float32
 
 cdef extern from "<stdlib.h>":
     double drand48()
+    void srand48(long seedval)
 
 cdef float_t randnum() noexcept:
     return <float_t>drand48()
@@ -106,6 +107,17 @@ constants['OCCUPIED_BOUNDARY'] = OCCUPIED_BOUNDARY
 constants['MOVE_POLICY_BOTH'] = MOVE_POLICY_BOTH
 constants['MOVE_POLICY_ALTERNATE'] = MOVE_POLICY_ALTERNATE
 constants['MOVE_POLICY_ONELEG_RANDOM'] = MOVE_POLICY_ONELEG_RANDOM
+
+
+def seed_random(long seed):
+    """Seed the loading-cache and motor random draws before a simulation.
+
+    NumPy generates the cached loading positions; the compiled motor code
+    uses drand48. Both generators are shared within a process. For independent
+    parallel simulations, use separate processes and seed each one there.
+    """
+    np.random.seed(seed)
+    srand48(seed)
 
 
 cdef inline float_t point_region_distance(float_t position, float_t start,

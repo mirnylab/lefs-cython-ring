@@ -9,6 +9,11 @@ the subset of heads captured at CTCF.
 Install from this checkout with `pip install -e .`. The Python import remains
 `from lefs_cython.simple import LEFSimulator, constants`.
 
+For repeatable runs, call `lefs_cython.simple.seed_random(seed)` before creating
+the simulator. This seeds both NumPy's loading-position cache and the compiled
+motor RNG. Independent parallel runs should use separate processes, since
+these generators are shared within a process.
+
 ## Circular backbone
 
 Pass `circular=True` to `LEFSimulator(...)` to connect sites `N-1` and `0`.
@@ -35,9 +40,10 @@ The original architecture notes below describe the shared motor dynamics.
 
 ## Verification
 
-Run `python -m pytest -q tests` to check both backbones. The 18 checks cover
+Run `python -m pytest -q tests` to check both backbones. The 19 checks cover
 the original linear dynamics plus ring crossings, loading and reloading at
-zero, collisions, directional capture/release, and circular graph distances.
+zero, collisions, directional capture/release, circular graph distances, and
+repeatable loading and movement from the same random seed.
 
 A CPU timing check with 50,000 sites and 435 motors took 1.63 seconds for
 100,000 updates on the development host. It used 0.0216 s per decision,

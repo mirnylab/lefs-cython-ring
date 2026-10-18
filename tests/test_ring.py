@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from lefs_cython.simple import LEFSimulator, constants
+from lefs_cython.simple import LEFSimulator, constants, seed_random
 
 
 def ring_at(positions, capture=None, release=None):
@@ -105,3 +105,16 @@ def test_ring_distances_without_cohesin():
     assert sim.compute_region_distances(98, 2, 4, 6) == 2
     assert sim.compute_region_distances(10, 20, 12, 15) == 0
     assert sim.compute_region_distances(0, 100, 30, 40) == 0
+
+
+def test_seed_reproduces_loading_and_motor_dynamics():
+    snapshots = []
+    for _ in range(2):
+        seed_random(42)  # An arbitrary repeatability control, not a model parameter.
+        sim = LEFSimulator(8, 100, np.ones(100), np.full((100, 5), .1),
+                           np.zeros((100, 2)), np.zeros(100), np.full(100, .5),
+                           circular=True)
+        sim.steps(0, 200)
+        snapshots.append((sim.get_LEFs(), sim.get_statuses(), sim.get_occupied()))
+    for first, second in zip(*snapshots):
+        np.testing.assert_array_equal(first, second)
