@@ -38,12 +38,31 @@ The default `circular=False` retains the original linear backbone.
 specify a three-dimensional periodic box or a polymer contact-distance rule.
 The original architecture notes below describe the shared motor dynamics.
 
+## Recording moving polymer springs
+
+`sim.steps_record(start, end)` advances the same motor dynamics as
+`sim.steps(start, end)` and returns an int64 NumPy array with columns
+`(tick, motor_slot, leg0_site, leg1_site)`. It stores one row only when a
+motor's endpoint pair changes, including immediate unloading/reloading in
+that same fixed slot. Changes in capture or collision status without endpoint
+movement do not change a polymer spring and therefore produce no row.
+Endpoints retain leg identities on a ring; they are not sorted by site index.
+
+Start with `sim.get_LEFs()` as the spring table. Each row at tick `i` describes
+the endpoints after that motor update, to apply before polymer integration
+from `i` to `i + 1`. A snapshot at boundary `S`, before applying that boundary's
+update, includes records with ticks less than `S`. The method advances ticks
+in `[start, end)` and adds no random draws. Successive calls can record chunks
+without keeping a dense time-by-motor trajectory in memory; ticks use int64.
+
 ## Verification
 
-Run `python -m pytest -q tests` to check both backbones. The 19 checks cover
+Run `python -m pytest -q tests` to check both backbones. The checks cover
 the original linear dynamics plus ring crossings, loading and reloading at
 zero, collisions, directional capture/release, circular graph distances, and
-repeatable loading and movement from the same random seed.
+repeatable loading and movement from the same random seed. Recording checks
+replay every endpoint update against the original dynamics, verify unchanged
+final statuses and subsequent random evolution, and test clocks past int32.
 
 A CPU timing check with 50,000 sites and 435 motors took 1.63 seconds for
 100,000 updates on the development host. It used 0.0216 s per decision,

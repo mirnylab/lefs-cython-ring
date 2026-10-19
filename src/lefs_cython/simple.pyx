@@ -368,6 +368,56 @@ cdef class LEFSimulator(object):
             if watch_flag:
                 self.watch(i)
 
+    def steps_record(self, int64_t step_start, int64_t step_end):
+        """Advance motors and return changed endpoint pairs for 3D coupling.
+
+        The int64 array has columns (tick, motor_slot, leg0_site, leg1_site).
+        Only motors whose endpoint pair changes during that tick are stored;
+        status changes without movement do not change a polymer spring.
+        Slots remain fixed across unloading and immediate replacement. Leg
+        identities are preserved, so ring endpoints need not be sorted.
+
+        Tick i performs the same unload, alternate-leg, and movement sequence
+        as steps(i, i + 1), without watches or extra random draws. The caller
+        applies its records before polymer integration from i to i + 1. A
+        snapshot at boundary S, before that boundary's motor update, therefore
+        includes records with tick < S. The interval is [step_start, step_end).
+
+        Records accumulate in a compiled vector, rather than a dense table of
+        every motor at every tick. Calls can be split into convenient chunks;
+        each call compares its first update with the current motor positions.
+        """
+        cdef int64_t tick
+        cdef int_t lef, left, right
+        cdef vector[int_t] previous
+        cdef vector[int64_t] records
+        cdef np.ndarray[int64_t, ndim=2, mode="c"] result
+
+        previous.resize(2 * self.NLEFs)
+        for lef in range(self.NLEFs):
+            previous[2 * lef] = self.LEFs[lef, 0]
+            previous[2 * lef + 1] = self.LEFs[lef, 1]
+
+        for tick in range(step_start, step_end):
+            self.unload()
+            if self.move_policy == MOVE_POLICY_ALTERNATE:
+                self.alternate_legs()
+            self.step()
+            for lef in range(self.NLEFs):
+                left, right = self.LEFs[lef, 0], self.LEFs[lef, 1]
+                if left != previous[2 * lef] or right != previous[2 * lef + 1]:
+                    records.push_back(tick)
+                    records.push_back(lef)
+                    records.push_back(left)
+                    records.push_back(right)
+                    previous[2 * lef] = left
+                    previous[2 * lef + 1] = right
+
+        result = np.empty((records.size() // 4, 4), dtype=np.int64)
+        if records.size():
+            memcpy(result.data, &records[0], records.size() * sizeof(int64_t))
+        return result
+
     def alternate_legs(self):
         """
         A function to alternate the legs that can move.
